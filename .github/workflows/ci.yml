@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+  quality:
+    name: Quality (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -27,11 +27,27 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Upgrade pip
-        run: python -m pip install --upgrade pip
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
 
-      - name: Run unit tests
+      - name: Sync dependencies
+        run: make setup
+
+      - name: Format check
+        run: make format-check
+
+      - name: Lint
+        run: make lint
+
+      - name: Typecheck
+        run: make typecheck
+
+      - name: Test with coverage
         run: make test
 
-      - name: Compile smoke check
-        run: python -m compileall -q main.py tests
+      - name: Upload coverage artifact
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml

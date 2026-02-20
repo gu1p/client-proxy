@@ -32,6 +32,34 @@ class DetermineToolAndArgsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client_proxy.determine_tool_and_args(["client-proxy"])
 
+    def test_requires_at_least_argv0(self) -> None:
+        with self.assertRaises(ValueError):
+            client_proxy.determine_tool_and_args([])
+
+
+class SettingsTests(unittest.TestCase):
+    def test_from_runtime_reads_env_files_and_allows_shell_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / "client-proxy"
+            wrapper.write_text("#!/bin/sh\n")
+            (Path(tmp) / ".env.example").write_text(
+                "SMART_SSD_MOUNT=/\nSMART_SSD_BASE=/Volumes/SSD-EXAMPLE/dev-caches\n",
+            )
+            settings = client_proxy.Settings.from_runtime(
+                str(wrapper),
+                {"SMART_SSD_BASE": "/Volumes/SSD-SHELL/dev-caches"},
+            )
+        self.assertEqual(settings.smart_ssd_mount, "/")
+        self.assertEqual(settings.smart_ssd_base, "/Volumes/SSD-SHELL/dev-caches")
+
+    def test_from_runtime_rejects_invalid_boolean_values(self) -> None:
+        with self.assertRaises(ValueError):
+            client_proxy.Settings.from_runtime("client-proxy", {"SMART_UV_MOVE_VENV": "banana"})
+
+    def test_cache_base_dir_falls_back_to_mount(self) -> None:
+        settings = client_proxy.Settings(smart_ssd_mount="/Volumes/SSD3")
+        self.assertEqual(settings.cache_base_dir, Path("/Volumes/SSD3/dev-caches"))
+
 
 class EnvFileTests(unittest.TestCase):
     def test_parse_env_file_supports_export_and_quotes(self) -> None:
@@ -195,8 +223,7 @@ class MainFlowTests(unittest.TestCase):
             wrapper = Path(tmp) / "client-proxy"
             wrapper.write_text("#!/bin/sh\n")
             (Path(tmp) / ".env.example").write_text(
-                "SMART_SSD_MOUNT=/Volumes/SSD-FROM-FILE\n"
-                f"SMART_SSD_BASE={tmp}/caches\n"
+                f"SMART_SSD_MOUNT=/Volumes/SSD-FROM-FILE\nSMART_SSD_BASE={tmp}/caches\n"
             )
             with (
                 patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=False),
@@ -229,6 +256,133 @@ class MainFlowTests(unittest.TestCase):
             rc = client_proxy.main(["client-proxy"])
         self.assertEqual(rc, 2)
         self.assertIn("Usage: client-proxy <uv|npm|pnpm>", stderr.getvalue())
+
+
+class UtilityEdgeCaseTests(unittest.TestCase):
+    def test_log_writes_when_debug_enabled(self) -> None:
+        stderr = StringIO()
+        settings = client_proxy.Settings(smart_ssd_debug=True)
+        with patch("sys.stderr", stderr):
+            client_proxy.log("hello", settings=settings)
+        self.assertIn("[client-proxy] hello", stderr.getvalue())
+
+    def test_parse_env_file_ignores_invalid_lines_and_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("NO_EQUALS\n=missing_key\nVALID=value\n", encoding="utf-8")
+            values = client_proxy.parse_env_file(env_file)
+            missing = client_proxy.parse_env_file(Path(tmp) / ".missing")
+        self.assertEqual(values, {"VALID": "value"})
+        self.assertEqual(missing, {})
+
+    def test_wrapper_dirs_deduplicates_real_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / "client-proxy"
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            with patch("main.wrapper_realpath", return_value=str(wrapper)):
+                dirs = client_proxy.wrapper_dirs_for_env_files(str(wrapper), {"PATH": tmp})
+        self.assertEqual(dirs, [Path(tmp)])
+
+    def test_find_project_root_returns_none_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "a" / "b"
+            nested.mkdir(parents=True)
+            self.assertIsNone(client_proxy.find_project_root_for_uv(nested))
+
+    def test_find_real_executable_handles_empty_path_segment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wrapper = base / "client-proxy"
+            wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+            real = base / "uv"
+            real.write_text("#!/bin/sh\n", encoding="utf-8")
+            real.chmod(0o755)
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(base)
+                found = client_proxy.find_real_executable("uv", str(wrapper), path_env=f":{tmp}")
+                resolved_found = os.path.realpath(found or "")
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(resolved_found, str(real.resolve()))
+
+    def test_is_mounted_handles_ismount_exception_and_fallback_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mount_path = Path(tmp) / "mount"
+            mount_path.mkdir()
+            with (
+                patch("main.os.path.ismount", side_effect=OSError("boom")),
+                patch(
+                    "main.subprocess.check_output", return_value=f"disk on {mount_path} type apfs"
+                ),
+            ):
+                self.assertTrue(client_proxy.is_mounted(str(mount_path)))
+
+    def test_is_mounted_handles_mount_command_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mount_path = Path(tmp) / "mount"
+            mount_path.mkdir()
+            with (
+                patch("main.os.path.ismount", return_value=False),
+                patch("main.subprocess.check_output", side_effect=OSError("boom")),
+            ):
+                self.assertFalse(client_proxy.is_mounted(str(mount_path)))
+
+    def test_is_mounted_returns_false_for_non_directory(self) -> None:
+        self.assertFalse(client_proxy.is_mounted("/definitely/not/a/real/path"))
+
+
+class HandlerEdgeCaseTests(unittest.TestCase):
+    def test_uv_handler_does_not_set_project_env_without_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cache-root"
+            cwd = Path(tmp) / "work"
+            cwd.mkdir()
+            env: dict[str, str] = {}
+            settings = client_proxy.Settings(smart_uv_move_venv=True)
+
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(cwd)
+                client_proxy.UvCliHandler.configure(env, base, settings)
+            finally:
+                os.chdir(old_cwd)
+
+            self.assertEqual(env["UV_CACHE_DIR"], str(base / "uv-cache"))
+            self.assertNotIn("UV_PROJECT_ENVIRONMENT", env)
+
+    def test_apply_env_for_unknown_tool_is_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            settings = client_proxy.Settings(smart_ssd_mount="/", smart_ssd_base=str(base))
+            env: dict[str, str] = {}
+            client_proxy.apply_env_for_tool("unknown", env, settings)
+            self.assertEqual(env, {})
+            self.assertTrue(base.is_dir())
+
+
+class RunTests(unittest.TestCase):
+    def test_run_exits_with_main_return_code(self) -> None:
+        with patch("main.main", return_value=5), self.assertRaises(SystemExit) as ctx:
+            client_proxy.run()
+        self.assertEqual(ctx.exception.code, 5)
+
+
+class MainErrorPathsTests(unittest.TestCase):
+    def test_main_returns_2_when_settings_are_invalid(self) -> None:
+        stderr = StringIO()
+        with (
+            patch("main.Settings.from_runtime", side_effect=ValueError("bad settings")),
+            patch("sys.stderr", stderr),
+        ):
+            rc = client_proxy.main(["client-proxy", "npm", "install"])
+
+        self.assertEqual(rc, 2)
+        self.assertIn("bad settings", stderr.getvalue())
 
 
 if __name__ == "__main__":

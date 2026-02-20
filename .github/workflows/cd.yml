@@ -26,11 +26,23 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Run unit tests
-        run: make test
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
 
-      - name: Compile smoke check
-        run: python -m compileall -q main.py tests
+      - name: Sync dependencies
+        run: make setup
+
+      - name: Format check
+        run: make format-check
+
+      - name: Lint
+        run: make lint
+
+      - name: Typecheck
+        run: make typecheck
+
+      - name: Test with coverage
+        run: make test
 
       - name: Compute next release tag
         id: next_tag
@@ -69,7 +81,7 @@ jobs:
           cp install.sh dist/install.sh
           chmod +x dist/install.sh
           tar -czf "dist/client-proxy-${TAG}.tar.gz" \
-            main.py Makefile .env.example install.sh README.md
+            main.py Makefile .env.example install.sh README.md pyproject.toml
           sha256sum "dist/client-proxy-${TAG}.tar.gz" \
             > "dist/client-proxy-${TAG}.sha256"
 
