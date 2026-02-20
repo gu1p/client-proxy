@@ -8,6 +8,8 @@
 curl -fsSL https://raw.githubusercontent.com/gu1p/client-proxy/main/install.sh | bash
 ```
 
+The installer is PEP-668 safe: it does not run `pip install` against system Python.
+
 ## Development setup
 
 ```bash

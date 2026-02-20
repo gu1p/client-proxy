@@ -24,10 +24,6 @@ mkdir -p "${BIN_DIR}"
 curl -fsSL "${RAW_BASE}/main.py" -o "${WRAPPER_PATH}"
 chmod +x "${WRAPPER_PATH}"
 
-if ! "${PYTHON_BIN}" -c "import pydantic" >/dev/null 2>&1; then
-  "${PYTHON_BIN}" -m pip install --user "pydantic>=2.10.6"
-fi
-
 ln -sf "${WRAPPER_PATH}" "${BIN_DIR}/uv"
 ln -sf "${WRAPPER_PATH}" "${BIN_DIR}/npm"
 ln -sf "${WRAPPER_PATH}" "${BIN_DIR}/pnpm"

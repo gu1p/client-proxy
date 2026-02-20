@@ -21,53 +21,76 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 WRAPPER_NAMES = {"client-proxy", "client-proxy.py", "ssdwrap", "ssdwrap.py"}
 TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+FALSE_VALUES = {"0", "false", "no", "n", "off", ""}
 
 
-class Settings(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+def parse_bool(value: object, *, default: bool, name: str) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in TRUE_VALUES:
+        return True
+    if normalized in FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name} must be a boolean-like value (accepted: 1/0,true/false,yes/no,y/n,on/off)"
+    )
 
+
+def normalize_mount(value: object) -> str:
+    if value is None:
+        return "/Volumes/SSD"
+    mount = str(value).strip()
+    return mount or "/Volumes/SSD"
+
+
+def normalize_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+@dataclass(frozen=True)
+class Settings:
     smart_ssd_mount: str = "/Volumes/SSD"
     smart_ssd_base: str | None = None
     smart_uv_move_venv: bool = False
     smart_pnpm_import_method: str = ""
     smart_ssd_debug: bool = False
 
-    @field_validator("smart_ssd_mount", mode="before")
-    @classmethod
-    def _normalize_mount(cls, value: object) -> str:
-        if value is None:
-            return "/Volumes/SSD"
-        mount = str(value).strip()
-        return mount or "/Volumes/SSD"
-
-    @field_validator("smart_pnpm_import_method", mode="before")
-    @classmethod
-    def _normalize_import_method(cls, value: object) -> str:
-        if value is None:
-            return ""
-        return str(value).strip()
-
     @classmethod
     def from_runtime(cls, argv0: str, env: Mapping[str, str]) -> Settings:
         defaults = load_env_file_defaults(argv0, env)
         merged: dict[str, str] = {**defaults, **dict(env)}
-        raw_settings: dict[str, object] = {
-            "smart_ssd_mount": merged.get("SMART_SSD_MOUNT", "/Volumes/SSD"),
-            "smart_ssd_base": merged.get("SMART_SSD_BASE"),
-            "smart_uv_move_venv": merged.get("SMART_UV_MOVE_VENV", "0"),
-            "smart_pnpm_import_method": merged.get("SMART_PNPM_IMPORT_METHOD", ""),
-            "smart_ssd_debug": merged.get("SMART_SSD_DEBUG", "0"),
-        }
 
         try:
-            return cls.model_validate(raw_settings)
-        except ValidationError as err:
+            return cls(
+                smart_ssd_mount=normalize_mount(merged.get("SMART_SSD_MOUNT")),
+                smart_ssd_base=normalize_optional_text(merged.get("SMART_SSD_BASE")),
+                smart_uv_move_venv=parse_bool(
+                    merged.get("SMART_UV_MOVE_VENV"),
+                    default=False,
+                    name="SMART_UV_MOVE_VENV",
+                ),
+                smart_pnpm_import_method=normalize_optional_text(
+                    merged.get("SMART_PNPM_IMPORT_METHOD")
+                )
+                or "",
+                smart_ssd_debug=parse_bool(
+                    merged.get("SMART_SSD_DEBUG"),
+                    default=False,
+                    name="SMART_SSD_DEBUG",
+                ),
+            )
+        except ValueError as err:
             raise ValueError(f"invalid wrapper settings: {err}") from err
 
     @property
