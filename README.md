@@ -9,6 +9,8 @@ curl -fsSL https://raw.githubusercontent.com/gu1p/client-proxy/main/install.sh |
 ```
 
 The installer is PEP-668 safe: it does not run `pip install` against system Python.
+It also auto-adds `~/bin` to PATH (idempotently) in your zsh/bash startup file.
+After install, run `exec $SHELL -l` (or open a new terminal), then `hash -r` if needed.
 
 ## Development setup
 
