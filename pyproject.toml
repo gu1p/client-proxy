@@ -1,0 +1,6 @@
+[project]
+name = "client-proxy"
+version = "0.1.0"
+description = "Client wrapper that redirects uv/npm/pnpm caches to an external SSD."
+requires-python = ">=3.13"
+dependencies = []

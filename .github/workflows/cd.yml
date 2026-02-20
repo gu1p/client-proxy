@@ -1,0 +1,47 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Build release artifacts
+        run: |
+          mkdir -p dist
+          cp main.py dist/client-proxy
+          chmod +x dist/client-proxy
+          cp install.sh dist/install.sh
+          chmod +x dist/install.sh
+          tar -czf "dist/client-proxy-${GITHUB_REF_NAME}.tar.gz" \
+            main.py Makefile .env.example install.sh README.md
+          sha256sum "dist/client-proxy-${GITHUB_REF_NAME}.tar.gz" \
+            > "dist/client-proxy-${GITHUB_REF_NAME}.sha256"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/client-proxy
+            dist/install.sh
+            dist/client-proxy-${{ github.ref_name }}.tar.gz
+            dist/client-proxy-${{ github.ref_name }}.sha256
