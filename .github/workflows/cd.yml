@@ -2,11 +2,14 @@ name: CD
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: ["main"]
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -15,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -24,23 +29,58 @@ jobs:
       - name: Run unit tests
         run: make test
 
-      - name: Build release artifacts
+      - name: Compile smoke check
+        run: python -m compileall -q main.py tests
+
+      - name: Compute next release tag
+        id: next_tag
         run: |
+          set -euo pipefail
+          git fetch --tags --force
+          latest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n 1)"
+          if [ -z "${latest}" ]; then
+            next="v0.1.0"
+          else
+            version="${latest#v}"
+            IFS='.' read -r major minor patch <<< "${version}"
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "tag=${next}" >> "${GITHUB_OUTPUT}"
+          echo "Next tag: ${next}"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.next_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}"
+          git push origin "${TAG}"
+
+      - name: Build release artifacts
+        env:
+          TAG: ${{ steps.next_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
           mkdir -p dist
           cp main.py dist/client-proxy
           chmod +x dist/client-proxy
           cp install.sh dist/install.sh
           chmod +x dist/install.sh
-          tar -czf "dist/client-proxy-${GITHUB_REF_NAME}.tar.gz" \
+          tar -czf "dist/client-proxy-${TAG}.tar.gz" \
             main.py Makefile .env.example install.sh README.md
-          sha256sum "dist/client-proxy-${GITHUB_REF_NAME}.tar.gz" \
-            > "dist/client-proxy-${GITHUB_REF_NAME}.sha256"
+          sha256sum "dist/client-proxy-${TAG}.tar.gz" \
+            > "dist/client-proxy-${TAG}.sha256"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.next_tag.outputs.tag }}
+          name: ${{ steps.next_tag.outputs.tag }}
+          generate_release_notes: true
           files: |
             dist/client-proxy
             dist/install.sh
-            dist/client-proxy-${{ github.ref_name }}.tar.gz
-            dist/client-proxy-${{ github.ref_name }}.sha256
+            dist/client-proxy-${{ steps.next_tag.outputs.tag }}.tar.gz
+            dist/client-proxy-${{ steps.next_tag.outputs.tag }}.sha256
