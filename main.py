@@ -272,7 +272,7 @@ class ToolRunContext:
     rustc_proxy: Path | None = None
 
 
-class UvCliHandler:
+class Uv:
     @staticmethod
     def find_project_root(start_dir: Path) -> Path | None:
         """
@@ -305,7 +305,7 @@ class UvCliHandler:
             else env_flag("SMART_UV_MOVE_VENV", env=env, default=False)
         )
         if should_move_venv:
-            root = UvCliHandler.find_project_root(Path.cwd())
+            root = Uv.find_project_root(Path.cwd())
             if root:
                 root_id = sha1_12(str(root.resolve()))
                 venv_dir = base_dir / "uv-venvs" / root_id
@@ -318,7 +318,7 @@ class UvCliHandler:
                 )
 
 
-class NpmCliHandler:
+class Npm:
     @staticmethod
     def configure(
         env: dict[str, str],
@@ -332,7 +332,7 @@ class NpmCliHandler:
         log(f"npm_config_cache={env['npm_config_cache']}", settings=settings, env=env)
 
 
-class PnpmCliHandler:
+class Pnpm:
     @staticmethod
     def configure(
         env: dict[str, str],
@@ -360,7 +360,7 @@ class PnpmCliHandler:
             )
 
 
-class CargoCliHandler:
+class Cargo:
     @staticmethod
     def toolchain_arg(args: Sequence[str]) -> str | None:
         if args and args[0].startswith("+"):
@@ -380,12 +380,12 @@ class CargoCliHandler:
 
     @staticmethod
     def resolve_proxies(env: Mapping[str, str]) -> tuple[Path, Path]:
-        cargo_proxy, rustc_proxy = CargoCliHandler.rustup_proxy_paths(env)
-        if not CargoCliHandler.is_executable_file(cargo_proxy):
+        cargo_proxy, rustc_proxy = Cargo.rustup_proxy_paths(env)
+        if not Cargo.is_executable_file(cargo_proxy):
             raise FileNotFoundError(
                 f"smart-cargo: expected rustup cargo at {cargo_proxy} (not found/executable)"
             )
-        if not CargoCliHandler.is_executable_file(rustc_proxy):
+        if not Cargo.is_executable_file(rustc_proxy):
             raise FileNotFoundError(
                 f"smart-cargo: expected rustup rustc at {rustc_proxy} (not found/executable)"
             )
@@ -403,7 +403,7 @@ class CargoCliHandler:
         if context.cargo_proxy is None or context.rustc_proxy is None:
             return
 
-        toolchain = CargoCliHandler.toolchain_arg(context.args)
+        toolchain = Cargo.toolchain_arg(context.args)
         locate_cmd: list[str] = [str(context.cargo_proxy)]
         if toolchain:
             locate_cmd.append(toolchain)
@@ -451,10 +451,10 @@ class CargoCliHandler:
 
 CliEnvHandler = Callable[[dict[str, str], Path, Settings, ToolRunContext], None]
 CLI_ENV_HANDLERS: dict[str, CliEnvHandler] = {
-    "uv": UvCliHandler.configure,
-    "npm": NpmCliHandler.configure,
-    "pnpm": PnpmCliHandler.configure,
-    "cargo": CargoCliHandler.configure,
+    "uv": Uv.configure,
+    "npm": Npm.configure,
+    "pnpm": Pnpm.configure,
+    "cargo": Cargo.configure,
 }
 
 
@@ -499,7 +499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     context = ToolRunContext(args=args)
     if tool == "cargo":
         try:
-            cargo_proxy, rustc_proxy = CargoCliHandler.resolve_proxies(env)
+            cargo_proxy, rustc_proxy = Cargo.resolve_proxies(env)
         except FileNotFoundError as err:
             print(err, file=sys.stderr)
             print("smart-cargo: bypass wrapper with: ~/.cargo/bin/cargo <args>", file=sys.stderr)

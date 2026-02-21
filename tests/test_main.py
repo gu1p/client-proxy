@@ -187,7 +187,7 @@ class HandlerTests(unittest.TestCase):
             old_cwd = Path.cwd()
             try:
                 os.chdir(nested)
-                client_proxy.UvCliHandler.configure(env, base)
+                client_proxy.Uv.configure(env, base)
             finally:
                 os.chdir(old_cwd)
 
@@ -201,7 +201,7 @@ class HandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "cache-root"
             env: dict[str, str] = {}
-            client_proxy.NpmCliHandler.configure(env, base)
+            client_proxy.Npm.configure(env, base)
             self.assertEqual(env["npm_config_cache"], str(base / "npm-cache"))
             self.assertTrue((base / "npm-cache").is_dir())
 
@@ -209,7 +209,7 @@ class HandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "cache-root"
             env = {"SMART_PNPM_IMPORT_METHOD": "hardlink"}
-            client_proxy.PnpmCliHandler.configure(env, base)
+            client_proxy.Pnpm.configure(env, base)
             self.assertEqual(env["npm_config_store_dir"], str(base / "pnpm-store"))
             self.assertEqual(env["npm_config_package_import_method"], "hardlink")
             self.assertTrue((base / "pnpm-store").is_dir())
@@ -218,7 +218,7 @@ class HandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "cache-root"
             env: dict[str, str] = {}
-            client_proxy.PnpmCliHandler.configure(env, base)
+            client_proxy.Pnpm.configure(env, base)
             self.assertEqual(env["npm_config_store_dir"], str(base / "pnpm-store"))
             self.assertNotIn("npm_config_package_import_method", env)
 
@@ -253,7 +253,7 @@ class HandlerTests(unittest.TestCase):
             ):
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = f"{manifest}\n"
-                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+                client_proxy.Cargo.configure(env, base, settings, context)
 
             workspace_hash = client_proxy.sha1_12(str(project.resolve()))
             tool_hash = client_proxy.sha1_12_bytes(b"rustc 1.80.0-nightly\n")
@@ -284,7 +284,7 @@ class HandlerTests(unittest.TestCase):
             with patch("main.subprocess.run") as run_mock:
                 run_mock.return_value.returncode = 1
                 run_mock.return_value.stdout = ""
-                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+                client_proxy.Cargo.configure(env, base, settings, context)
 
             self.assertNotIn("CARGO_TARGET_DIR", env)
 
@@ -323,18 +323,18 @@ class HandlerTests(unittest.TestCase):
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = f"{manifest}\n"
                 with self.assertRaises(RuntimeError):
-                    client_proxy.CargoCliHandler.configure(env, base, settings, context)
+                    client_proxy.Cargo.configure(env, base, settings, context)
 
     def test_cargo_handler_returns_when_settings_or_context_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "cache-root"
             env: dict[str, str] = {}
 
-            client_proxy.CargoCliHandler.configure(env, base, None, None)
+            client_proxy.Cargo.configure(env, base, None, None)
             self.assertNotIn("CARGO_TARGET_DIR", env)
 
             settings = client_proxy.Settings(smart_ssd_base=str(base))
-            client_proxy.CargoCliHandler.configure(
+            client_proxy.Cargo.configure(
                 env,
                 base,
                 settings,
@@ -363,7 +363,7 @@ class HandlerTests(unittest.TestCase):
             env: dict[str, str] = {}
 
             with patch("main.subprocess.run", side_effect=OSError("boom")):
-                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+                client_proxy.Cargo.configure(env, base, settings, context)
 
             self.assertNotIn("CARGO_TARGET_DIR", env)
 
@@ -390,7 +390,7 @@ class HandlerTests(unittest.TestCase):
             with patch("main.subprocess.run") as run_mock:
                 run_mock.return_value.returncode = 0
                 run_mock.return_value.stdout = ""
-                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+                client_proxy.Cargo.configure(env, base, settings, context)
 
             self.assertNotIn("CARGO_TARGET_DIR", env)
 
@@ -459,7 +459,7 @@ class MainFlowTests(unittest.TestCase):
         stderr = StringIO()
         with (
             patch(
-                "main.CargoCliHandler.resolve_proxies",
+                "main.Cargo.resolve_proxies",
                 side_effect=FileNotFoundError("missing cargo proxy"),
             ),
             patch("sys.stderr", stderr),
@@ -479,9 +479,7 @@ class MainFlowTests(unittest.TestCase):
             rustc_proxy.chmod(0o755)
 
             with (
-                patch(
-                    "main.CargoCliHandler.resolve_proxies", return_value=(cargo_proxy, rustc_proxy)
-                ),
+                patch("main.Cargo.resolve_proxies", return_value=(cargo_proxy, rustc_proxy)),
                 patch("main.is_mounted", return_value=False),
                 patch("main.os.execvpe") as execvpe,
             ):
@@ -535,7 +533,7 @@ class UtilityEdgeCaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             nested = Path(tmp) / "a" / "b"
             nested.mkdir(parents=True)
-            self.assertIsNone(client_proxy.UvCliHandler.find_project_root(nested))
+            self.assertIsNone(client_proxy.Uv.find_project_root(nested))
 
     def test_find_real_executable_handles_empty_path_segment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -586,10 +584,8 @@ class UtilityEdgeCaseTests(unittest.TestCase):
         self.assertFalse(client_proxy.is_mounted("/definitely/not/a/real/path"))
 
     def test_cargo_toolchain_arg_detection(self) -> None:
-        self.assertEqual(
-            client_proxy.CargoCliHandler.toolchain_arg(["+nightly", "build"]), "+nightly"
-        )
-        self.assertIsNone(client_proxy.CargoCliHandler.toolchain_arg(["build"]))
+        self.assertEqual(client_proxy.Cargo.toolchain_arg(["+nightly", "build"]), "+nightly")
+        self.assertIsNone(client_proxy.Cargo.toolchain_arg(["build"]))
 
     def test_resolve_cargo_proxies_from_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -602,9 +598,7 @@ class UtilityEdgeCaseTests(unittest.TestCase):
             cargo_proxy.chmod(0o755)
             rustc_proxy.chmod(0o755)
 
-            resolved_cargo, resolved_rustc = client_proxy.CargoCliHandler.resolve_proxies(
-                {"HOME": str(home)}
-            )
+            resolved_cargo, resolved_rustc = client_proxy.Cargo.resolve_proxies({"HOME": str(home)})
 
         self.assertEqual(resolved_cargo, cargo_proxy)
         self.assertEqual(resolved_rustc, rustc_proxy)
@@ -618,7 +612,7 @@ class UtilityEdgeCaseTests(unittest.TestCase):
             rustc_proxy.chmod(0o755)
 
             with self.assertRaises(FileNotFoundError):
-                client_proxy.CargoCliHandler.resolve_proxies({"HOME": str(home)})
+                client_proxy.Cargo.resolve_proxies({"HOME": str(home)})
 
     def test_resolve_cargo_proxies_requires_rustc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -629,7 +623,7 @@ class UtilityEdgeCaseTests(unittest.TestCase):
             cargo_proxy.chmod(0o755)
 
             with self.assertRaises(FileNotFoundError):
-                client_proxy.CargoCliHandler.resolve_proxies({"HOME": str(home)})
+                client_proxy.Cargo.resolve_proxies({"HOME": str(home)})
 
 
 class HandlerEdgeCaseTests(unittest.TestCase):
@@ -644,7 +638,7 @@ class HandlerEdgeCaseTests(unittest.TestCase):
             old_cwd = Path.cwd()
             try:
                 os.chdir(cwd)
-                client_proxy.UvCliHandler.configure(env, base, settings)
+                client_proxy.Uv.configure(env, base, settings)
             finally:
                 os.chdir(old_cwd)
 
