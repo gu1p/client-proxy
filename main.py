@@ -224,87 +224,45 @@ def sha1_12_bytes(value: bytes) -> str:
     return hashlib.sha1(value).hexdigest()[:12]
 
 
-def find_project_root_for_uv(start_dir: Path) -> Path | None:
-    """
-    Walk up from cwd looking for pyproject.toml or uv.toml.
-    Used only if SMART_UV_MOVE_VENV=1 to move the project's venv off-repo.
-    """
-    cur = start_dir.resolve()
-    while True:
-        if (cur / "pyproject.toml").is_file() or (cur / "uv.toml").is_file():
-            return cur
-        if cur.parent == cur:
-            return None
-        cur = cur.parent
-
-
 def wrapper_realpath(argv0: str) -> str:
     # argv0 may be a symlink name like ~/bin/uv -> ~/bin/client-proxy
     return os.path.realpath(argv0)
 
 
-def find_real_executable(cmd_name: str, argv0: str, path_env: str | None = None) -> str | None:
-    """
-    Search PATH for cmd_name, skipping anything that resolves to this wrapper.
-    This avoids recursion when PATH has ~/bin first.
-    """
-    me = wrapper_realpath(argv0)
-    path = path_env if path_env is not None else os.environ.get("PATH", "")
-    for path_dir in path.split(os.pathsep):
-        if not path_dir:
-            path_dir = "."
-        candidate = os.path.join(path_dir, cmd_name)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            if os.path.realpath(candidate) == me:
-                continue
-            return candidate
-    return None
+class CliRuntime:
+    @staticmethod
+    def find_real_executable(cmd_name: str, argv0: str, path_env: str | None = None) -> str | None:
+        """
+        Search PATH for cmd_name, skipping anything that resolves to this wrapper.
+        This avoids recursion when PATH has ~/bin first.
+        """
+        me = wrapper_realpath(argv0)
+        path = path_env if path_env is not None else os.environ.get("PATH", "")
+        for path_dir in path.split(os.pathsep):
+            if not path_dir:
+                path_dir = "."
+            candidate = os.path.join(path_dir, cmd_name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                if os.path.realpath(candidate) == me:
+                    continue
+                return candidate
+        return None
 
-
-def determine_tool_and_args(argv: Sequence[str]) -> tuple[str, list[str]]:
-    """
-    If invoked as uv/npm/pnpm/cargo (via symlink), tool is basename(argv[0]).
-    If invoked as client-proxy, allow: client-proxy uv <args...>
-    """
-    if not argv:
-        raise ValueError("Usage: client-proxy <uv|npm|pnpm|cargo> [args...]")
-
-    invoked = Path(argv[0]).name
-    if invoked in WRAPPER_NAMES:
-        if len(argv) < 2:
+    @staticmethod
+    def determine_tool_and_args(argv: Sequence[str]) -> tuple[str, list[str]]:
+        """
+        If invoked as uv/npm/pnpm/cargo (via symlink), tool is basename(argv[0]).
+        If invoked as client-proxy, allow: client-proxy uv <args...>
+        """
+        if not argv:
             raise ValueError("Usage: client-proxy <uv|npm|pnpm|cargo> [args...]")
-        return argv[1], list(argv[2:])
-    return invoked, list(argv[1:])
 
-
-def cargo_toolchain_arg(args: Sequence[str]) -> str | None:
-    if args and args[0].startswith("+"):
-        return args[0]
-    return None
-
-
-def rustup_proxy_paths(env: Mapping[str, str]) -> tuple[Path, Path]:
-    home = env.get("HOME", "").strip() or str(Path.home())
-    cargo_proxy = Path(home).expanduser() / ".cargo" / "bin" / "cargo"
-    rustc_proxy = Path(home).expanduser() / ".cargo" / "bin" / "rustc"
-    return cargo_proxy, rustc_proxy
-
-
-def is_executable_file(path: Path) -> bool:
-    return path.is_file() and os.access(path, os.X_OK)
-
-
-def resolve_cargo_proxies(env: Mapping[str, str]) -> tuple[Path, Path]:
-    cargo_proxy, rustc_proxy = rustup_proxy_paths(env)
-    if not is_executable_file(cargo_proxy):
-        raise FileNotFoundError(
-            f"smart-cargo: expected rustup cargo at {cargo_proxy} (not found/executable)"
-        )
-    if not is_executable_file(rustc_proxy):
-        raise FileNotFoundError(
-            f"smart-cargo: expected rustup rustc at {rustc_proxy} (not found/executable)"
-        )
-    return cargo_proxy, rustc_proxy
+        invoked = Path(argv[0]).name
+        if invoked in WRAPPER_NAMES:
+            if len(argv) < 2:
+                raise ValueError("Usage: client-proxy <uv|npm|pnpm|cargo> [args...]")
+            return argv[1], list(argv[2:])
+        return invoked, list(argv[1:])
 
 
 @dataclass(frozen=True)
@@ -315,6 +273,20 @@ class ToolRunContext:
 
 
 class UvCliHandler:
+    @staticmethod
+    def find_project_root(start_dir: Path) -> Path | None:
+        """
+        Walk up from cwd looking for pyproject.toml or uv.toml.
+        Used only if SMART_UV_MOVE_VENV=1 to move the project's venv off-repo.
+        """
+        cur = start_dir.resolve()
+        while True:
+            if (cur / "pyproject.toml").is_file() or (cur / "uv.toml").is_file():
+                return cur
+            if cur.parent == cur:
+                return None
+            cur = cur.parent
+
     @staticmethod
     def configure(
         env: dict[str, str],
@@ -333,7 +305,7 @@ class UvCliHandler:
             else env_flag("SMART_UV_MOVE_VENV", env=env, default=False)
         )
         if should_move_venv:
-            root = find_project_root_for_uv(Path.cwd())
+            root = UvCliHandler.find_project_root(Path.cwd())
             if root:
                 root_id = sha1_12(str(root.resolve()))
                 venv_dir = base_dir / "uv-venvs" / root_id
@@ -390,6 +362,36 @@ class PnpmCliHandler:
 
 class CargoCliHandler:
     @staticmethod
+    def toolchain_arg(args: Sequence[str]) -> str | None:
+        if args and args[0].startswith("+"):
+            return args[0]
+        return None
+
+    @staticmethod
+    def rustup_proxy_paths(env: Mapping[str, str]) -> tuple[Path, Path]:
+        home = env.get("HOME", "").strip() or str(Path.home())
+        cargo_proxy = Path(home).expanduser() / ".cargo" / "bin" / "cargo"
+        rustc_proxy = Path(home).expanduser() / ".cargo" / "bin" / "rustc"
+        return cargo_proxy, rustc_proxy
+
+    @staticmethod
+    def is_executable_file(path: Path) -> bool:
+        return path.is_file() and os.access(path, os.X_OK)
+
+    @staticmethod
+    def resolve_proxies(env: Mapping[str, str]) -> tuple[Path, Path]:
+        cargo_proxy, rustc_proxy = CargoCliHandler.rustup_proxy_paths(env)
+        if not CargoCliHandler.is_executable_file(cargo_proxy):
+            raise FileNotFoundError(
+                f"smart-cargo: expected rustup cargo at {cargo_proxy} (not found/executable)"
+            )
+        if not CargoCliHandler.is_executable_file(rustc_proxy):
+            raise FileNotFoundError(
+                f"smart-cargo: expected rustup rustc at {rustc_proxy} (not found/executable)"
+            )
+        return cargo_proxy, rustc_proxy
+
+    @staticmethod
     def configure(
         env: dict[str, str],
         base_dir: Path,
@@ -401,7 +403,7 @@ class CargoCliHandler:
         if context.cargo_proxy is None or context.rustc_proxy is None:
             return
 
-        toolchain = cargo_toolchain_arg(context.args)
+        toolchain = CargoCliHandler.toolchain_arg(context.args)
         locate_cmd: list[str] = [str(context.cargo_proxy)]
         if toolchain:
             locate_cmd.append(toolchain)
@@ -482,7 +484,7 @@ def apply_env_for_tool(
 def main(argv: Sequence[str] | None = None) -> int:
     argsv = list(argv) if argv is not None else list(sys.argv)
     try:
-        tool, args = determine_tool_and_args(argsv)
+        tool, args = CliRuntime.determine_tool_and_args(argsv)
     except ValueError as err:
         print(err, file=sys.stderr)
         return 2
@@ -497,7 +499,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     context = ToolRunContext(args=args)
     if tool == "cargo":
         try:
-            cargo_proxy, rustc_proxy = resolve_cargo_proxies(env)
+            cargo_proxy, rustc_proxy = CargoCliHandler.resolve_proxies(env)
         except FileNotFoundError as err:
             print(err, file=sys.stderr)
             print("smart-cargo: bypass wrapper with: ~/.cargo/bin/cargo <args>", file=sys.stderr)
@@ -522,7 +524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if tool == "cargo" and context.cargo_proxy is not None:
         real = str(context.cargo_proxy)
     else:
-        real = find_real_executable(tool, argsv[0], path_env=env.get("PATH"))
+        real = CliRuntime.find_real_executable(tool, argsv[0], path_env=env.get("PATH"))
     if not real:
         print(
             f"client-proxy: can't find real '{tool}' in PATH (after skipping wrapper).",

@@ -13,34 +13,36 @@ import main as client_proxy
 
 class DetermineToolAndArgsTests(unittest.TestCase):
     def test_parses_client_proxy_style_invocation(self) -> None:
-        tool, args = client_proxy.determine_tool_and_args(
+        tool, args = client_proxy.CliRuntime.determine_tool_and_args(
             ["client-proxy", "uv", "sync", "--frozen"]
         )
         self.assertEqual(tool, "uv")
         self.assertEqual(args, ["sync", "--frozen"])
 
     def test_parses_legacy_ssdwrap_style_invocation(self) -> None:
-        tool, args = client_proxy.determine_tool_and_args(["ssdwrap", "uv", "sync"])
+        tool, args = client_proxy.CliRuntime.determine_tool_and_args(["ssdwrap", "uv", "sync"])
         self.assertEqual(tool, "uv")
         self.assertEqual(args, ["sync"])
 
     def test_parses_symlink_style_invocation(self) -> None:
-        tool, args = client_proxy.determine_tool_and_args(["/usr/local/bin/npm", "install"])
+        tool, args = client_proxy.CliRuntime.determine_tool_and_args(
+            ["/usr/local/bin/npm", "install"]
+        )
         self.assertEqual(tool, "npm")
         self.assertEqual(args, ["install"])
 
     def test_parses_cargo_with_toolchain_prefix(self) -> None:
-        tool, args = client_proxy.determine_tool_and_args(["cargo", "+nightly", "build"])
+        tool, args = client_proxy.CliRuntime.determine_tool_and_args(["cargo", "+nightly", "build"])
         self.assertEqual(tool, "cargo")
         self.assertEqual(args, ["+nightly", "build"])
 
     def test_requires_tool_when_invoked_as_wrapper(self) -> None:
         with self.assertRaises(ValueError):
-            client_proxy.determine_tool_and_args(["client-proxy"])
+            client_proxy.CliRuntime.determine_tool_and_args(["client-proxy"])
 
     def test_requires_at_least_argv0(self) -> None:
         with self.assertRaises(ValueError):
-            client_proxy.determine_tool_and_args([])
+            client_proxy.CliRuntime.determine_tool_and_args([])
 
 
 class SettingsTests(unittest.TestCase):
@@ -167,7 +169,7 @@ class FindRealExecutableTests(unittest.TestCase):
             real.chmod(0o755)
 
             with patch.dict(os.environ, {"PATH": f"{first}{os.pathsep}{second}"}, clear=False):
-                found = client_proxy.find_real_executable("uv", str(wrapper))
+                found = client_proxy.CliRuntime.find_real_executable("uv", str(wrapper))
 
             self.assertEqual(found, str(real))
 
@@ -402,7 +404,7 @@ class MainFlowTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, env, clear=False),
                 patch("main.is_mounted", return_value=True),
-                patch("main.find_real_executable", return_value="/usr/bin/npm"),
+                patch("main.CliRuntime.find_real_executable", return_value="/usr/bin/npm"),
                 patch("main.os.execvpe") as execvpe,
             ):
                 rc = client_proxy.main(["client-proxy", "npm", "install"])
@@ -424,7 +426,7 @@ class MainFlowTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=False),
                 patch("main.is_mounted", return_value=True) as is_mounted,
-                patch("main.find_real_executable", return_value="/usr/bin/npm"),
+                patch("main.CliRuntime.find_real_executable", return_value="/usr/bin/npm"),
                 patch("main.os.execvpe") as execvpe,
             ):
                 rc = client_proxy.main([str(wrapper), "npm", "install"])
@@ -438,7 +440,7 @@ class MainFlowTests(unittest.TestCase):
         stderr = StringIO()
         with (
             patch("main.is_mounted", return_value=False),
-            patch("main.find_real_executable", return_value=None),
+            patch("main.CliRuntime.find_real_executable", return_value=None),
             patch("sys.stderr", stderr),
         ):
             rc = client_proxy.main(["uv", "sync"])
@@ -457,7 +459,8 @@ class MainFlowTests(unittest.TestCase):
         stderr = StringIO()
         with (
             patch(
-                "main.resolve_cargo_proxies", side_effect=FileNotFoundError("missing cargo proxy")
+                "main.CargoCliHandler.resolve_proxies",
+                side_effect=FileNotFoundError("missing cargo proxy"),
             ),
             patch("sys.stderr", stderr),
         ):
@@ -476,7 +479,9 @@ class MainFlowTests(unittest.TestCase):
             rustc_proxy.chmod(0o755)
 
             with (
-                patch("main.resolve_cargo_proxies", return_value=(cargo_proxy, rustc_proxy)),
+                patch(
+                    "main.CargoCliHandler.resolve_proxies", return_value=(cargo_proxy, rustc_proxy)
+                ),
                 patch("main.is_mounted", return_value=False),
                 patch("main.os.execvpe") as execvpe,
             ):
@@ -530,7 +535,7 @@ class UtilityEdgeCaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             nested = Path(tmp) / "a" / "b"
             nested.mkdir(parents=True)
-            self.assertIsNone(client_proxy.find_project_root_for_uv(nested))
+            self.assertIsNone(client_proxy.UvCliHandler.find_project_root(nested))
 
     def test_find_real_executable_handles_empty_path_segment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,7 +550,9 @@ class UtilityEdgeCaseTests(unittest.TestCase):
             old_cwd = Path.cwd()
             try:
                 os.chdir(base)
-                found = client_proxy.find_real_executable("uv", str(wrapper), path_env=f":{tmp}")
+                found = client_proxy.CliRuntime.find_real_executable(
+                    "uv", str(wrapper), path_env=f":{tmp}"
+                )
                 resolved_found = os.path.realpath(found or "")
             finally:
                 os.chdir(old_cwd)
@@ -579,8 +586,10 @@ class UtilityEdgeCaseTests(unittest.TestCase):
         self.assertFalse(client_proxy.is_mounted("/definitely/not/a/real/path"))
 
     def test_cargo_toolchain_arg_detection(self) -> None:
-        self.assertEqual(client_proxy.cargo_toolchain_arg(["+nightly", "build"]), "+nightly")
-        self.assertIsNone(client_proxy.cargo_toolchain_arg(["build"]))
+        self.assertEqual(
+            client_proxy.CargoCliHandler.toolchain_arg(["+nightly", "build"]), "+nightly"
+        )
+        self.assertIsNone(client_proxy.CargoCliHandler.toolchain_arg(["build"]))
 
     def test_resolve_cargo_proxies_from_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -593,7 +602,9 @@ class UtilityEdgeCaseTests(unittest.TestCase):
             cargo_proxy.chmod(0o755)
             rustc_proxy.chmod(0o755)
 
-            resolved_cargo, resolved_rustc = client_proxy.resolve_cargo_proxies({"HOME": str(home)})
+            resolved_cargo, resolved_rustc = client_proxy.CargoCliHandler.resolve_proxies(
+                {"HOME": str(home)}
+            )
 
         self.assertEqual(resolved_cargo, cargo_proxy)
         self.assertEqual(resolved_rustc, rustc_proxy)
@@ -607,7 +618,7 @@ class UtilityEdgeCaseTests(unittest.TestCase):
             rustc_proxy.chmod(0o755)
 
             with self.assertRaises(FileNotFoundError):
-                client_proxy.resolve_cargo_proxies({"HOME": str(home)})
+                client_proxy.CargoCliHandler.resolve_proxies({"HOME": str(home)})
 
     def test_resolve_cargo_proxies_requires_rustc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -618,7 +629,7 @@ class UtilityEdgeCaseTests(unittest.TestCase):
             cargo_proxy.chmod(0o755)
 
             with self.assertRaises(FileNotFoundError):
-                client_proxy.resolve_cargo_proxies({"HOME": str(home)})
+                client_proxy.CargoCliHandler.resolve_proxies({"HOME": str(home)})
 
 
 class HandlerEdgeCaseTests(unittest.TestCase):
