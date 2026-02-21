@@ -109,6 +109,7 @@ chmod +x "${WRAPPER_PATH}"
 ln -sf "${WRAPPER_PATH}" "${BIN_DIR}/uv"
 ln -sf "${WRAPPER_PATH}" "${BIN_DIR}/npm"
 ln -sf "${WRAPPER_PATH}" "${BIN_DIR}/pnpm"
+ln -sf "${WRAPPER_PATH}" "${BIN_DIR}/cargo"
 
 if [ ! -f "${BIN_DIR}/.env.example" ]; then
   curl -fsSL "${RAW_BASE}/.env.example" -o "${BIN_DIR}/.env.example"
@@ -116,7 +117,7 @@ fi
 
 ensure_path_in_shell_rc
 
-echo "Installed ${WRAPPER_NAME} and uv/npm/pnpm links into ${BIN_DIR}"
+echo "Installed ${WRAPPER_NAME} and uv/npm/pnpm/cargo links into ${BIN_DIR}"
 
 if [ "${PATH_RC_UPDATED}" = "1" ]; then
   echo "Updated PATH in ${PATH_RC_FILE}"

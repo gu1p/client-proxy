@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from io import StringIO
@@ -27,6 +28,11 @@ class DetermineToolAndArgsTests(unittest.TestCase):
         tool, args = client_proxy.determine_tool_and_args(["/usr/local/bin/npm", "install"])
         self.assertEqual(tool, "npm")
         self.assertEqual(args, ["install"])
+
+    def test_parses_cargo_with_toolchain_prefix(self) -> None:
+        tool, args = client_proxy.determine_tool_and_args(["cargo", "+nightly", "build"])
+        self.assertEqual(tool, "cargo")
+        self.assertEqual(args, ["+nightly", "build"])
 
     def test_requires_tool_when_invoked_as_wrapper(self) -> None:
         with self.assertRaises(ValueError):
@@ -59,6 +65,24 @@ class SettingsTests(unittest.TestCase):
     def test_cache_base_dir_falls_back_to_mount(self) -> None:
         settings = client_proxy.Settings(smart_ssd_mount="/Volumes/SSD3")
         self.assertEqual(settings.cache_base_dir, Path("/Volumes/SSD3/dev-caches"))
+
+    def test_from_runtime_uses_default_cargo_subdir(self) -> None:
+        settings = client_proxy.Settings.from_runtime("client-proxy", {})
+        self.assertEqual(settings.smart_cargo_subdir, "cargo-targets")
+
+    def test_from_runtime_allows_cargo_subdir_override(self) -> None:
+        settings = client_proxy.Settings.from_runtime(
+            "client-proxy",
+            {"SMART_CARGO_SUBDIR": "cargo-targets-custom"},
+        )
+        self.assertEqual(settings.smart_cargo_subdir, "cargo-targets-custom")
+
+    def test_parse_bool_accepts_bool_and_truthy_text(self) -> None:
+        self.assertTrue(client_proxy.parse_bool(True, default=False, name="X"))
+        self.assertTrue(client_proxy.parse_bool("true", default=False, name="X"))
+
+    def test_normalize_mount_defaults_for_none(self) -> None:
+        self.assertEqual(client_proxy.normalize_mount(None), "/Volumes/SSD")
 
 
 class EnvFileTests(unittest.TestCase):
@@ -196,6 +220,178 @@ class HandlerTests(unittest.TestCase):
             self.assertEqual(env["npm_config_store_dir"], str(base / "pnpm-store"))
             self.assertNotIn("npm_config_package_import_method", env)
 
+    def test_cargo_handler_sets_target_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cache-root"
+            home = Path(tmp) / "home"
+            cargo_proxy = home / ".cargo" / "bin" / "cargo"
+            rustc_proxy = home / ".cargo" / "bin" / "rustc"
+            cargo_proxy.parent.mkdir(parents=True, exist_ok=True)
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+            rustc_proxy.chmod(0o755)
+
+            project = Path(tmp) / "project"
+            manifest = project / "Cargo.toml"
+            project.mkdir(parents=True, exist_ok=True)
+            manifest.write_text("[package]\nname='demo'\n", encoding="utf-8")
+
+            env: dict[str, str] = {}
+            settings = client_proxy.Settings(smart_ssd_base=str(base))
+            context = client_proxy.ToolRunContext(
+                args=["+nightly", "build"],
+                cargo_proxy=cargo_proxy,
+                rustc_proxy=rustc_proxy,
+            )
+
+            with (
+                patch("main.subprocess.run") as run_mock,
+                patch("main.subprocess.check_output", return_value=b"rustc 1.80.0-nightly\n"),
+            ):
+                run_mock.return_value.returncode = 0
+                run_mock.return_value.stdout = f"{manifest}\n"
+                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+
+            workspace_hash = client_proxy.sha1_12(str(project.resolve()))
+            tool_hash = client_proxy.sha1_12_bytes(b"rustc 1.80.0-nightly\n")
+            expected = base / "cargo-targets" / f"{workspace_hash}-{tool_hash}"
+            self.assertEqual(env["CARGO_TARGET_DIR"], str(expected))
+            self.assertTrue(expected.is_dir())
+
+    def test_cargo_handler_skips_target_when_workspace_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cache-root"
+            home = Path(tmp) / "home"
+            cargo_proxy = home / ".cargo" / "bin" / "cargo"
+            rustc_proxy = home / ".cargo" / "bin" / "rustc"
+            cargo_proxy.parent.mkdir(parents=True, exist_ok=True)
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+            rustc_proxy.chmod(0o755)
+
+            env: dict[str, str] = {}
+            settings = client_proxy.Settings(smart_ssd_base=str(base))
+            context = client_proxy.ToolRunContext(
+                args=["build"],
+                cargo_proxy=cargo_proxy,
+                rustc_proxy=rustc_proxy,
+            )
+
+            with patch("main.subprocess.run") as run_mock:
+                run_mock.return_value.returncode = 1
+                run_mock.return_value.stdout = ""
+                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+
+            self.assertNotIn("CARGO_TARGET_DIR", env)
+
+    def test_cargo_handler_raises_on_rustc_fingerprint_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cache-root"
+            home = Path(tmp) / "home"
+            cargo_proxy = home / ".cargo" / "bin" / "cargo"
+            rustc_proxy = home / ".cargo" / "bin" / "rustc"
+            cargo_proxy.parent.mkdir(parents=True, exist_ok=True)
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+            rustc_proxy.chmod(0o755)
+
+            project = Path(tmp) / "project"
+            manifest = project / "Cargo.toml"
+            project.mkdir(parents=True, exist_ok=True)
+            manifest.write_text("[package]\nname='demo'\n", encoding="utf-8")
+
+            settings = client_proxy.Settings(smart_ssd_base=str(base))
+            context = client_proxy.ToolRunContext(
+                args=["build"],
+                cargo_proxy=cargo_proxy,
+                rustc_proxy=rustc_proxy,
+            )
+            env: dict[str, str] = {}
+
+            with (
+                patch("main.subprocess.run") as run_mock,
+                patch(
+                    "main.subprocess.check_output",
+                    side_effect=subprocess.CalledProcessError(1, ["rustc", "-vV"]),
+                ),
+            ):
+                run_mock.return_value.returncode = 0
+                run_mock.return_value.stdout = f"{manifest}\n"
+                with self.assertRaises(RuntimeError):
+                    client_proxy.CargoCliHandler.configure(env, base, settings, context)
+
+    def test_cargo_handler_returns_when_settings_or_context_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cache-root"
+            env: dict[str, str] = {}
+
+            client_proxy.CargoCliHandler.configure(env, base, None, None)
+            self.assertNotIn("CARGO_TARGET_DIR", env)
+
+            settings = client_proxy.Settings(smart_ssd_base=str(base))
+            client_proxy.CargoCliHandler.configure(
+                env,
+                base,
+                settings,
+                client_proxy.ToolRunContext(args=["build"]),
+            )
+            self.assertNotIn("CARGO_TARGET_DIR", env)
+
+    def test_cargo_handler_returns_when_locate_project_fails_to_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cache-root"
+            home = Path(tmp) / "home"
+            cargo_proxy = home / ".cargo" / "bin" / "cargo"
+            rustc_proxy = home / ".cargo" / "bin" / "rustc"
+            cargo_proxy.parent.mkdir(parents=True, exist_ok=True)
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+            rustc_proxy.chmod(0o755)
+
+            settings = client_proxy.Settings(smart_ssd_base=str(base))
+            context = client_proxy.ToolRunContext(
+                args=["build"],
+                cargo_proxy=cargo_proxy,
+                rustc_proxy=rustc_proxy,
+            )
+            env: dict[str, str] = {}
+
+            with patch("main.subprocess.run", side_effect=OSError("boom")):
+                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+
+            self.assertNotIn("CARGO_TARGET_DIR", env)
+
+    def test_cargo_handler_returns_when_manifest_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "cache-root"
+            home = Path(tmp) / "home"
+            cargo_proxy = home / ".cargo" / "bin" / "cargo"
+            rustc_proxy = home / ".cargo" / "bin" / "rustc"
+            cargo_proxy.parent.mkdir(parents=True, exist_ok=True)
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+            rustc_proxy.chmod(0o755)
+
+            settings = client_proxy.Settings(smart_ssd_base=str(base))
+            context = client_proxy.ToolRunContext(
+                args=["build"],
+                cargo_proxy=cargo_proxy,
+                rustc_proxy=rustc_proxy,
+            )
+            env: dict[str, str] = {}
+
+            with patch("main.subprocess.run") as run_mock:
+                run_mock.return_value.returncode = 0
+                run_mock.return_value.stdout = ""
+                client_proxy.CargoCliHandler.configure(env, base, settings, context)
+
+            self.assertNotIn("CARGO_TARGET_DIR", env)
+
 
 class MainFlowTests(unittest.TestCase):
     def test_main_execs_tool_with_modified_env_when_mounted(self) -> None:
@@ -255,7 +451,54 @@ class MainFlowTests(unittest.TestCase):
         with patch("sys.stderr", stderr):
             rc = client_proxy.main(["client-proxy"])
         self.assertEqual(rc, 2)
-        self.assertIn("Usage: client-proxy <uv|npm|pnpm>", stderr.getvalue())
+        self.assertIn("Usage: client-proxy <uv|npm|pnpm|cargo>", stderr.getvalue())
+
+    def test_main_returns_127_when_cargo_proxy_is_missing(self) -> None:
+        stderr = StringIO()
+        with (
+            patch(
+                "main.resolve_cargo_proxies", side_effect=FileNotFoundError("missing cargo proxy")
+            ),
+            patch("sys.stderr", stderr),
+        ):
+            rc = client_proxy.main(["cargo", "build"])
+
+        self.assertEqual(rc, 127)
+        self.assertIn("missing cargo proxy", stderr.getvalue())
+
+    def test_main_execs_cargo_proxy_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cargo_proxy = Path(tmp) / "cargo"
+            rustc_proxy = Path(tmp) / "rustc"
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+            rustc_proxy.chmod(0o755)
+
+            with (
+                patch("main.resolve_cargo_proxies", return_value=(cargo_proxy, rustc_proxy)),
+                patch("main.is_mounted", return_value=False),
+                patch("main.os.execvpe") as execvpe,
+            ):
+                rc = client_proxy.main(["cargo", "build"])
+
+            self.assertEqual(rc, 0)
+            called_real, called_argv, _called_env = execvpe.call_args[0]
+            self.assertEqual(called_real, str(cargo_proxy))
+            self.assertEqual(called_argv, [str(cargo_proxy), "build"])
+
+    def test_main_returns_127_when_apply_env_for_tool_fails(self) -> None:
+        stderr = StringIO()
+        with (
+            patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=False),
+            patch("main.is_mounted", return_value=True),
+            patch("main.apply_env_for_tool", side_effect=RuntimeError("boom")),
+            patch("sys.stderr", stderr),
+        ):
+            rc = client_proxy.main(["client-proxy", "npm", "install"])
+
+        self.assertEqual(rc, 127)
+        self.assertIn("boom", stderr.getvalue())
 
 
 class UtilityEdgeCaseTests(unittest.TestCase):
@@ -334,6 +577,48 @@ class UtilityEdgeCaseTests(unittest.TestCase):
 
     def test_is_mounted_returns_false_for_non_directory(self) -> None:
         self.assertFalse(client_proxy.is_mounted("/definitely/not/a/real/path"))
+
+    def test_cargo_toolchain_arg_detection(self) -> None:
+        self.assertEqual(client_proxy.cargo_toolchain_arg(["+nightly", "build"]), "+nightly")
+        self.assertIsNone(client_proxy.cargo_toolchain_arg(["build"]))
+
+    def test_resolve_cargo_proxies_from_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cargo_proxy = home / ".cargo" / "bin" / "cargo"
+            rustc_proxy = home / ".cargo" / "bin" / "rustc"
+            cargo_proxy.parent.mkdir(parents=True, exist_ok=True)
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+            rustc_proxy.chmod(0o755)
+
+            resolved_cargo, resolved_rustc = client_proxy.resolve_cargo_proxies({"HOME": str(home)})
+
+        self.assertEqual(resolved_cargo, cargo_proxy)
+        self.assertEqual(resolved_rustc, rustc_proxy)
+
+    def test_resolve_cargo_proxies_requires_cargo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            rustc_proxy = home / ".cargo" / "bin" / "rustc"
+            rustc_proxy.parent.mkdir(parents=True, exist_ok=True)
+            rustc_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            rustc_proxy.chmod(0o755)
+
+            with self.assertRaises(FileNotFoundError):
+                client_proxy.resolve_cargo_proxies({"HOME": str(home)})
+
+    def test_resolve_cargo_proxies_requires_rustc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cargo_proxy = home / ".cargo" / "bin" / "cargo"
+            cargo_proxy.parent.mkdir(parents=True, exist_ok=True)
+            cargo_proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+            cargo_proxy.chmod(0o755)
+
+            with self.assertRaises(FileNotFoundError):
+                client_proxy.resolve_cargo_proxies({"HOME": str(home)})
 
 
 class HandlerEdgeCaseTests(unittest.TestCase):

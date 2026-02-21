@@ -27,6 +27,7 @@ install-links:
 	@ln -sf "$(WRAPPER_PATH)" "$(BIN_DIR)/uv"
 	@ln -sf "$(WRAPPER_PATH)" "$(BIN_DIR)/npm"
 	@ln -sf "$(WRAPPER_PATH)" "$(BIN_DIR)/pnpm"
+	@ln -sf "$(WRAPPER_PATH)" "$(BIN_DIR)/cargo"
 
 install-env:
 	@mkdir -p "$(BIN_DIR)"
@@ -38,7 +39,7 @@ install-env:
 	fi
 
 uninstall:
-	@rm -f "$(BIN_DIR)/uv" "$(BIN_DIR)/npm" "$(BIN_DIR)/pnpm" "$(WRAPPER_PATH)"
+	@rm -f "$(BIN_DIR)/uv" "$(BIN_DIR)/npm" "$(BIN_DIR)/pnpm" "$(BIN_DIR)/cargo" "$(WRAPPER_PATH)"
 	@echo "Removed wrapper links from $(BIN_DIR)"
 	@echo "Kept $(ENV_EXAMPLE_TARGET)"
 

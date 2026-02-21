@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-client-proxy: a tiny wrapper for uv/npm/pnpm that redirects caches to an external SSD
+client-proxy: a tiny wrapper for uv/npm/pnpm/cargo that redirects caches to an
+external SSD
 when it's mounted.
 
 How it works:
-- Detects the command name it was invoked as (uv, npm, pnpm)
+- Detects the command name it was invoked as (uv, npm, pnpm, cargo)
   OR you can call it as: client-proxy uv <args...>
 - Loads optional defaults from `.env.example` and `.env` next to the wrapper binary.
 - If /Volumes/SSD is mounted, sets tool-specific env vars:
     uv   -> UV_CACHE_DIR, optionally UV_PROJECT_ENVIRONMENT
     npm  -> npm_config_cache
     pnpm -> npm_config_store_dir, optionally npm_config_package_import_method
+    cargo -> CARGO_TARGET_DIR (workspace/toolchain-specific path)
 - Execs the *real* tool from PATH (skipping this wrapper)
 """
 
@@ -64,6 +66,7 @@ class Settings:
     smart_ssd_base: str | None = None
     smart_uv_move_venv: bool = False
     smart_pnpm_import_method: str = ""
+    smart_cargo_subdir: str = "cargo-targets"
     smart_ssd_debug: bool = False
 
     @classmethod
@@ -84,6 +87,8 @@ class Settings:
                     merged.get("SMART_PNPM_IMPORT_METHOD")
                 )
                 or "",
+                smart_cargo_subdir=normalize_optional_text(merged.get("SMART_CARGO_SUBDIR"))
+                or "cargo-targets",
                 smart_ssd_debug=parse_bool(
                     merged.get("SMART_SSD_DEBUG"),
                     default=False,
@@ -215,6 +220,10 @@ def sha1_12(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
 
 
+def sha1_12_bytes(value: bytes) -> str:
+    return hashlib.sha1(value).hexdigest()[:12]
+
+
 def find_project_root_for_uv(start_dir: Path) -> Path | None:
     """
     Walk up from cwd looking for pyproject.toml or uv.toml.
@@ -254,23 +263,65 @@ def find_real_executable(cmd_name: str, argv0: str, path_env: str | None = None)
 
 def determine_tool_and_args(argv: Sequence[str]) -> tuple[str, list[str]]:
     """
-    If invoked as uv/npm/pnpm (via symlink), tool is basename(argv[0]).
+    If invoked as uv/npm/pnpm/cargo (via symlink), tool is basename(argv[0]).
     If invoked as client-proxy, allow: client-proxy uv <args...>
     """
     if not argv:
-        raise ValueError("Usage: client-proxy <uv|npm|pnpm> [args...]")
+        raise ValueError("Usage: client-proxy <uv|npm|pnpm|cargo> [args...]")
 
     invoked = Path(argv[0]).name
     if invoked in WRAPPER_NAMES:
         if len(argv) < 2:
-            raise ValueError("Usage: client-proxy <uv|npm|pnpm> [args...]")
+            raise ValueError("Usage: client-proxy <uv|npm|pnpm|cargo> [args...]")
         return argv[1], list(argv[2:])
     return invoked, list(argv[1:])
 
 
+def cargo_toolchain_arg(args: Sequence[str]) -> str | None:
+    if args and args[0].startswith("+"):
+        return args[0]
+    return None
+
+
+def rustup_proxy_paths(env: Mapping[str, str]) -> tuple[Path, Path]:
+    home = env.get("HOME", "").strip() or str(Path.home())
+    cargo_proxy = Path(home).expanduser() / ".cargo" / "bin" / "cargo"
+    rustc_proxy = Path(home).expanduser() / ".cargo" / "bin" / "rustc"
+    return cargo_proxy, rustc_proxy
+
+
+def is_executable_file(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def resolve_cargo_proxies(env: Mapping[str, str]) -> tuple[Path, Path]:
+    cargo_proxy, rustc_proxy = rustup_proxy_paths(env)
+    if not is_executable_file(cargo_proxy):
+        raise FileNotFoundError(
+            f"smart-cargo: expected rustup cargo at {cargo_proxy} (not found/executable)"
+        )
+    if not is_executable_file(rustc_proxy):
+        raise FileNotFoundError(
+            f"smart-cargo: expected rustup rustc at {rustc_proxy} (not found/executable)"
+        )
+    return cargo_proxy, rustc_proxy
+
+
+@dataclass(frozen=True)
+class ToolRunContext:
+    args: Sequence[str]
+    cargo_proxy: Path | None = None
+    rustc_proxy: Path | None = None
+
+
 class UvCliHandler:
     @staticmethod
-    def configure(env: dict[str, str], base_dir: Path, settings: Settings | None = None) -> None:
+    def configure(
+        env: dict[str, str],
+        base_dir: Path,
+        settings: Settings | None = None,
+        context: ToolRunContext | None = None,
+    ) -> None:
         uv_cache = base_dir / "uv-cache"
         uv_cache.mkdir(parents=True, exist_ok=True)
         env["UV_CACHE_DIR"] = str(uv_cache)
@@ -297,7 +348,12 @@ class UvCliHandler:
 
 class NpmCliHandler:
     @staticmethod
-    def configure(env: dict[str, str], base_dir: Path, settings: Settings | None = None) -> None:
+    def configure(
+        env: dict[str, str],
+        base_dir: Path,
+        settings: Settings | None = None,
+        context: ToolRunContext | None = None,
+    ) -> None:
         npm_cache = base_dir / "npm-cache"
         npm_cache.mkdir(parents=True, exist_ok=True)
         env["npm_config_cache"] = str(npm_cache)
@@ -306,7 +362,12 @@ class NpmCliHandler:
 
 class PnpmCliHandler:
     @staticmethod
-    def configure(env: dict[str, str], base_dir: Path, settings: Settings | None = None) -> None:
+    def configure(
+        env: dict[str, str],
+        base_dir: Path,
+        settings: Settings | None = None,
+        context: ToolRunContext | None = None,
+    ) -> None:
         pnpm_store = base_dir / "pnpm-store"
         pnpm_store.mkdir(parents=True, exist_ok=True)
         env["npm_config_store_dir"] = str(pnpm_store)
@@ -327,15 +388,80 @@ class PnpmCliHandler:
             )
 
 
-CliEnvHandler = Callable[[dict[str, str], Path, Settings], None]
+class CargoCliHandler:
+    @staticmethod
+    def configure(
+        env: dict[str, str],
+        base_dir: Path,
+        settings: Settings | None = None,
+        context: ToolRunContext | None = None,
+    ) -> None:
+        if settings is None or context is None:
+            return
+        if context.cargo_proxy is None or context.rustc_proxy is None:
+            return
+
+        toolchain = cargo_toolchain_arg(context.args)
+        locate_cmd: list[str] = [str(context.cargo_proxy)]
+        if toolchain:
+            locate_cmd.append(toolchain)
+        locate_cmd.extend(["locate-project", "--workspace", "--message-format", "plain"])
+
+        try:
+            locate_proc = subprocess.run(
+                locate_cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                check=False,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return
+
+        if locate_proc.returncode != 0:
+            return
+
+        manifest = locate_proc.stdout.strip()
+        if not manifest:
+            return
+
+        workspace = Path(os.path.realpath(str(Path(manifest).expanduser().parent)))
+        workspace_hash = sha1_12(str(workspace))
+
+        rustc_cmd: list[str] = [str(context.rustc_proxy)]
+        if toolchain:
+            rustc_cmd.append(toolchain)
+        rustc_cmd.append("-vV")
+
+        try:
+            tool_output = subprocess.check_output(rustc_cmd, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError) as err:
+            raise RuntimeError(
+                "smart-cargo: failed to fingerprint rust toolchain via rustc -vV"
+            ) from err
+
+        tool_hash = sha1_12_bytes(tool_output)
+        target_dir = base_dir / settings.smart_cargo_subdir / f"{workspace_hash}-{tool_hash}"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        env["CARGO_TARGET_DIR"] = str(target_dir)
+        log(f"CARGO_TARGET_DIR={env['CARGO_TARGET_DIR']}", settings=settings, env=env)
+
+
+CliEnvHandler = Callable[[dict[str, str], Path, Settings, ToolRunContext], None]
 CLI_ENV_HANDLERS: dict[str, CliEnvHandler] = {
     "uv": UvCliHandler.configure,
     "npm": NpmCliHandler.configure,
     "pnpm": PnpmCliHandler.configure,
+    "cargo": CargoCliHandler.configure,
 }
 
 
-def apply_env_for_tool(tool: str, env: dict[str, str], settings: Settings) -> None:
+def apply_env_for_tool(
+    tool: str,
+    env: dict[str, str],
+    settings: Settings,
+    context: ToolRunContext | None = None,
+) -> None:
     base_dir = settings.cache_base_dir
     base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -349,7 +475,8 @@ def apply_env_for_tool(tool: str, env: dict[str, str], settings: Settings) -> No
         )
         return
 
-    handler(env, base_dir, settings)
+    run_context = context if context is not None else ToolRunContext(args=())
+    handler(env, base_dir, settings, run_context)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -367,9 +494,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"client-proxy: {err}", file=sys.stderr)
         return 2
 
+    context = ToolRunContext(args=args)
+    if tool == "cargo":
+        try:
+            cargo_proxy, rustc_proxy = resolve_cargo_proxies(env)
+        except FileNotFoundError as err:
+            print(err, file=sys.stderr)
+            print("smart-cargo: bypass wrapper with: ~/.cargo/bin/cargo <args>", file=sys.stderr)
+            return 127
+        context = ToolRunContext(args=args, cargo_proxy=cargo_proxy, rustc_proxy=rustc_proxy)
+
     if is_mounted(settings.smart_ssd_mount) and tool in CLI_ENV_HANDLERS:
         log(f"SSD mounted at {settings.smart_ssd_mount}", settings=settings, env=env)
-        apply_env_for_tool(tool, env, settings)
+        try:
+            apply_env_for_tool(tool, env, settings, context)
+        except RuntimeError as err:
+            print(err, file=sys.stderr)
+            return 127
     else:
         log(
             f"SSD not mounted or tool unsupported (tool={tool})",
@@ -377,7 +518,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             env=env,
         )
 
-    real = find_real_executable(tool, argsv[0], path_env=env.get("PATH"))
+    real: str | None
+    if tool == "cargo" and context.cargo_proxy is not None:
+        real = str(context.cargo_proxy)
+    else:
+        real = find_real_executable(tool, argsv[0], path_env=env.get("PATH"))
     if not real:
         print(
             f"client-proxy: can't find real '{tool}' in PATH (after skipping wrapper).",

@@ -1,6 +1,6 @@
 # client-proxy
 
-`client-proxy` is a client wrapper for `uv`, `npm`, and `pnpm` that routes caches to an external SSD when mounted.
+`client-proxy` is a client wrapper for `uv`, `npm`, `pnpm`, and `cargo` that routes caches to an external SSD when mounted.
 
 ## Install
 
@@ -25,7 +25,9 @@ make setup
   - `uv` -> `UV_CACHE_DIR` (and optional `UV_PROJECT_ENVIRONMENT`)
   - `npm` -> `npm_config_cache`
   - `pnpm` -> `npm_config_store_dir` (and optional `npm_config_package_import_method`)
+  - `cargo` -> `CARGO_TARGET_DIR` (`<SMART_SSD_BASE>/cargo-targets/<workspace-hash>-<toolchain-hash>`)
 - Falls back to normal tool behavior when SSD is not mounted.
+- `cargo` wrapping expects rustup proxies at `~/.cargo/bin/cargo` and `~/.cargo/bin/rustc`.
 
 ## Local install (from source)
 
@@ -46,6 +48,7 @@ make check
 ## Configuration
 
 Defaults are loaded from `.env.example` and `.env` in the wrapper directory. Existing shell env vars always win.
+For cargo path layout, use `SMART_CARGO_SUBDIR` (defaults to `cargo-targets`).
 
 ## CI/CD policy
 
